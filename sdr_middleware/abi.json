@@ -1,0 +1,193 @@
+[
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "reporter",
+				"type": "address"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "freqHz",
+				"type": "uint256"
+			},
+			{
+				"indexed": false,
+				"internalType": "int256",
+				"name": "rssi",
+				"type": "int256"
+			},
+			{
+				"indexed": false,
+				"internalType": "bool",
+				"name": "detected",
+				"type": "bool"
+			},
+			{
+				"indexed": false,
+				"internalType": "bytes32",
+				"name": "metaHash",
+				"type": "bytes32"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "time",
+				"type": "uint256"
+			}
+		],
+		"name": "ReadingSubmitted",
+		"type": "event"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			}
+		],
+		"name": "getReading",
+		"outputs": [
+			{
+				"components": [
+					{
+						"internalType": "address",
+						"name": "reporter",
+						"type": "address"
+					},
+					{
+						"internalType": "uint256",
+						"name": "freqHz",
+						"type": "uint256"
+					},
+					{
+						"internalType": "int256",
+						"name": "rssi",
+						"type": "int256"
+					},
+					{
+						"internalType": "bool",
+						"name": "detected",
+						"type": "bool"
+					},
+					{
+						"internalType": "uint256",
+						"name": "time",
+						"type": "uint256"
+					},
+					{
+						"internalType": "bytes32",
+						"name": "metaHash",
+						"type": "bytes32"
+					}
+				],
+				"internalType": "struct SDRSignalLog.Reading",
+				"name": "",
+				"type": "tuple"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"name": "readings",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "reporter",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "freqHz",
+				"type": "uint256"
+			},
+			{
+				"internalType": "int256",
+				"name": "rssi",
+				"type": "int256"
+			},
+			{
+				"internalType": "bool",
+				"name": "detected",
+				"type": "bool"
+			},
+			{
+				"internalType": "uint256",
+				"name": "time",
+				"type": "uint256"
+			},
+			{
+				"internalType": "bytes32",
+				"name": "metaHash",
+				"type": "bytes32"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "freqHz",
+				"type": "uint256"
+			},
+			{
+				"internalType": "int256",
+				"name": "rssi",
+				"type": "int256"
+			},
+			{
+				"internalType": "bool",
+				"name": "detected",
+				"type": "bool"
+			},
+			{
+				"internalType": "bytes32",
+				"name": "metaHash",
+				"type": "bytes32"
+			}
+		],
+		"name": "submitReading",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "id",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "totalReadings",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	}
+]
