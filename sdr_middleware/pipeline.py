@@ -1,80 +1,82 @@
-import csv
-import time
+# pipeline.py
 import json
-from web3 import Web3
+import hashlib
+import numpy as np
+import pandas as pd
 from dotenv import load_dotenv
 import os
 
-# ── Config ──────────────────────────────────────────
+from connect import w3, contract, WALLET
+from submit import submit_reading
+
 load_dotenv()
 
-w3 = Web3(Web3.HTTPProvider(os.getenv("RPC_URL")))
-with open("abi.json") as f:
-    abi = json.load(f)
-
-contract = w3.eth.contract(address=os.getenv("CONTRACT_ADDRESS"), abi=abi)
-wallet   = w3.eth.account.from_key(os.getenv("PRIVATE_KEY")).address
-key      = os.getenv("PRIVATE_KEY")
-
 # ── Settings ─────────────────────────────────────────
-CSV_FILE       = "gnu_radio_output.csv"
-POLL_INTERVAL  = 2
-JAM_RSSI_SPIKE = 20
-JAM_RSSI_FLOOR = -40
+CSV_FILE = "pluto_capture_auto_100-w-time.csv"
+JAM_RSSI_SPIKE      = 5
+JAM_RSSI_FLOOR      = -10
+PU_RSSI_THRESHOLD   = -12
+CENTER_FREQ_HZ      = int(os.getenv("CENTER_FREQ_HZ", 915_000_000))
+SIGNAL_THRESHOLD_DB = -16.0
 
-# ── Jam Detection ────────────────────────────────────
+# ── IQ → Power ───────────────────────────────────────
+def process_iq_file(filepath):
+    df = pd.read_csv(filepath)
+    df["power_db"] = 20 * np.log10(
+        np.maximum(np.sqrt(df["I"]**2 + df["Q"]**2), 1e-10)
+    )
+    df["detected"] = df["power_db"] > SIGNAL_THRESHOLD_DB
+    return df[["Time (s)", "power_db", "detected"]].to_dict("records")
+
+# ── Detection ────────────────────────────────────────
 def detect_jam(rssi, prev_rssi):
     if rssi > JAM_RSSI_FLOOR:
-        print(f"⚠️  Jam suspected: RSSI {rssi}dBm above floor")
+        print(f"⚠️  Jam suspected: RSSI {rssi:.2f}dBm above floor")
         return True
     if prev_rssi is not None and abs(rssi - prev_rssi) >= JAM_RSSI_SPIKE:
-        print(f"⚠️  Jam suspected: RSSI spiked ({prev_rssi} → {rssi})")
+        print(f"⚠️  Jam suspected: RSSI spiked ({prev_rssi:.2f} → {rssi:.2f})")
         return True
     return False
 
-# ── Submit ───────────────────────────────────────────
-def submit(freq_hz, rssi, detected, jam):
-    tx = contract.functions.submitReading(
-        freq_hz, rssi, detected, bytes(32)
-    ).build_transaction({
-        "from":  wallet,
-        "nonce": w3.eth.get_transaction_count(wallet),
-        "gas":   200000,
-    })
-    signed  = w3.eth.account.sign_transaction(tx, key)
-    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-    w3.eth.wait_for_transaction_receipt(tx_hash)
-    status = "🚨 JAM" if jam else "✅ OK "
-    print(f"{status} | {freq_hz}Hz | {rssi}dBm | detected={detected}")
+def detect_pu(rssi, detected):
+    if detected and rssi > PU_RSSI_THRESHOLD:
+        print(f"📡 Primary User detected: RSSI {rssi:.2f}dBm")
+        return True
+    return False
 
-# ── Main Loop ────────────────────────────────────────
+def make_meta_hash(jam: bool, pu: bool) -> bytes:
+    meta = json.dumps({"jam": jam, "pu": pu}).encode()
+    return hashlib.sha256(meta).digest()
+
+# ── Main ─────────────────────────────────────────────
 def run():
-    submitted = 0
     prev_rssi = None
 
-    print(f"🔁 Watching {CSV_FILE} every {POLL_INTERVAL}s...")
     print(f"📡 Contract: {os.getenv('CONTRACT_ADDRESS')}")
-    print(f"👛 Wallet:   {wallet}\n")
+    print(f"👛 Wallet:   {WALLET}")
+    print(f"📻 Center Freq: {CENTER_FREQ_HZ} Hz\n")
 
-    while True:
-        try:
-            with open(CSV_FILE) as f:
-                rows = list(csv.DictReader(f))
+    try:
+        samples = process_iq_file(CSV_FILE)
+        print(f"🔁 Processing {len(samples)} samples from {CSV_FILE}...\n")
 
-            for row in rows[submitted:]:
-                freq_hz  = int(row["frequency"])
-                rssi     = int(float(row["power_db"]))
-                detected = row["detected"] == "1"
-                jam      = detect_jam(rssi, prev_rssi)
+        for sample in samples:
+            rssi     = sample["power_db"]
+            detected = sample["detected"]
+            jam      = detect_jam(rssi, prev_rssi)
+            pu       = detect_pu(rssi, detected)
+            meta     = make_meta_hash(jam, pu)
 
-                submit(freq_hz, rssi, detected, jam)
-                prev_rssi = rssi
-                submitted += 1
+            status = "🚨 JAM" if jam else ("📡 PU" if pu else "✅ OK")
+            print(f"{status} | {CENTER_FREQ_HZ}Hz | {rssi:.2f}dBm | detected={detected}")
 
-        except FileNotFoundError:
-            print(f"⏳ Waiting for {CSV_FILE}...")
+            submit_reading(CENTER_FREQ_HZ, int(rssi), detected, meta)
+            prev_rssi = rssi
 
-        time.sleep(POLL_INTERVAL)
+        print(f"\n✅ Done. {len(samples)} readings submitted to chain.")
+
+    except FileNotFoundError:
+        print(f"❌ File not found: {CSV_FILE}")
 
 if __name__ == "__main__":
     run()
