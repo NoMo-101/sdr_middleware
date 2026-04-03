@@ -5,10 +5,10 @@
 
 ## What This Does
 
-Captures radio signal data from GNU Radio (SDR hardware), detects jamming events, and permanently logs everything to a smart contract on the blockchain. Data is tamper-proof and can never be edited or deleted.
+Captures raw IQ signal data from a PlutoSDR device via GNU Radio, converts it to power/RSSI values, detects jamming events and Primary User presence, and permanently logs everything to a smart contract on the blockchain. Data is tamper-proof and can never be edited or deleted.
 
 ```
-SDR Hardware → GNU Radio → CSV file → pipeline.py → Blockchain → log_viewer.py
+PlutoSDR Hardware → GNU Radio → IQ CSV file → pipeline.py → Blockchain → log_viewer.py
 ```
 
 ---
@@ -57,7 +57,7 @@ You will see `(venv)` at the start of your terminal line when it is active.
 
 ### Step 4 — Install Python Dependencies
 ```bash
-pip install web3 python-dotenv
+pip install web3 python-dotenv numpy pandas
 ```
 
 ### Step 5 — Create Your .env File
@@ -66,6 +66,7 @@ Create a new file called `.env` in the `sdr_middleware` folder and paste this in
 RPC_URL=http://127.0.0.1:8545
 PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 CONTRACT_ADDRESS=paste_after_deploying
+CENTER_FREQ_HZ=915000000
 ```
 
 > ⚠️ The private key above is a public Hardhat test key. It is safe for local development only. Never use a real wallet private key.
@@ -108,7 +109,7 @@ source venv/Scripts/activate
 You need to do this every session since Hardhat resets.
 
 1. Go to [remix.ethereum.org](https://remix.ethereum.org)
-2. Create a new file and paste in the contract code from the **Contract Code** section below
+2. Open your contract file
 3. Click the **Solidity Compiler** tab on the left and click **Compile**
 4. Click the **Deploy & Run** tab on the left
 5. Change **Environment** to **Hardhat Provider**
@@ -118,6 +119,8 @@ You need to do this every session since Hardhat resets.
 9. Click the **ABI** button in the Compiler tab to copy it
 10. Paste the ABI into `abi.json` replacing everything that was there
 
+> ⚠️ Every time Hardhat restarts you must update CONTRACT_ADDRESS in .env AND refresh abi.json. Both must match the new deployment or the scripts will fail.
+
 ---
 
 ### Terminal 2 — Run the Pipeline
@@ -125,13 +128,91 @@ You need to do this every session since Hardhat resets.
 python pipeline.py
 ```
 
-This watches the CSV file and submits every new reading to the contract automatically. Stop it at any time with `Ctrl+C`.
+This processes the IQ CSV file, converts raw signal data to power values, detects jamming and Primary User events, and submits every reading to the contract. Runs once through the file and exits.
 
 ---
 
 ### View Everything Logged On Chain
 ```bash
 python log_viewer.py
+```
+
+---
+
+## How The Pipeline Works
+
+### IQ Data → Power → RSSI
+
+The PlutoSDR outputs raw IQ (In-phase/Quadrature) samples. These are the lowest level representation of a radio signal. The pipeline converts them to a usable power value using:
+
+```
+amplitude = sqrt(I² + Q²)
+power_db  = 20 × log10(amplitude)
+```
+
+This gives you a signal strength in dBm that can be compared against thresholds.
+
+### Signal Detection
+A reading is marked as `detected=True` if the power is above the signal threshold:
+```python
+SIGNAL_THRESHOLD_DB = -16.0   # below this = noise, above = signal present
+```
+
+### Jam Detection
+Two conditions trigger a jam flag:
+```python
+JAM_RSSI_FLOOR = -10    # signal above this is abnormally strong
+JAM_RSSI_SPIKE = 5      # jump of 5+ dBm between readings is suspicious
+```
+
+### Primary User Detection
+A Primary User is flagged if a signal is detected AND RSSI is above the PU threshold:
+```python
+PU_RSSI_THRESHOLD = -12   # above this with detection = PU likely present
+```
+
+### Meta Hash
+Each reading stores a cryptographic fingerprint of its jam and PU state:
+```python
+meta = json.dumps({"jam": jam, "pu": pu}).encode()
+metaHash = hashlib.sha256(meta).digest()
+```
+This allows anyone to verify the jam/PU flags for any reading by recomputing the hash.
+
+---
+
+## Baseline Signal Characterization
+
+Based on real PlutoSDR captures at 915 MHz the normal signal range is:
+
+| Metric | Value |
+|---|---|
+| Normal RSSI range | -12 to -15 dBm |
+| Jam threshold (floor) | -10 dBm |
+| PU threshold | -12 dBm |
+| Signal detection floor | -16 dBm |
+
+These thresholds will be updated as more captures with jamming events become available.
+
+---
+
+## Project File Structure
+
+```
+sdr_middleware/
+├── .env                          ← your secrets (never share or commit this)
+├── .gitignore                    ← keeps .env and node_modules off GitHub
+├── abi.json                      ← contract ABI copied from Remix
+├── connect.py                    ← sets up blockchain connection
+├── submit.py                     ← sends readings to the contract
+├── pipeline.py                   ← main script, processes IQ CSV and submits data
+├── log_viewer.py                 ← displays all on-chain readings in a table
+├── test_submit.py                ← tests that your connection is working
+├── pluto_capture_auto_100-w-time.csv  ← real PlutoSDR IQ capture
+├── gnu_radio_output.csv          ← simulated test data (legacy)
+├── hardhat.config.js             ← Hardhat local blockchain config
+├── package.json
+└── venv/                         ← Python virtual environment (auto-generated)
 ```
 
 ---
@@ -148,10 +229,10 @@ contract SDRSignalLog {
     struct Reading {
         address reporter;     // who submitted (your oracle/script wallet)
         uint256 freqHz;       // frequency in Hz
-        int256 rssi;          // signal strength (signed, e.g. -42)
+        int256 rssi;          // signal strength (signed, e.g. -13)
         bool detected;        // signal present?
         uint256 time;         // block timestamp
-        bytes32 metaHash;     // optional: hash of extra off-chain data (IQ file, JSON, etc.)
+        bytes32 metaHash;     // SHA256 hash of {jam, pu} state
     }
 
     Reading[] public readings;
@@ -206,50 +287,24 @@ contract SDRSignalLog {
 
 ---
 
-## Project File Structure
+## CSV Format
 
-```
-sdr_middleware/
-├── .env                     ← your secrets (never share or commit this)
-├── .gitignore               ← keeps .env and node_modules off GitHub
-├── abi.json                 ← contract ABI copied from Remix
-├── connect.py               ← sets up blockchain connection
-├── submit.py                ← sends readings to the contract
-├── pipeline.py              ← main script, watches CSV and submits data
-├── log_viewer.py            ← displays all on-chain readings in a table
-├── test_submit.py           ← tests that your connection is working
-├── gnu_radio_output.csv     ← signal data (real or simulated)
-├── hardhat.config.js        ← Hardhat local blockchain config
-├── package.json
-└── venv/                    ← Python virtual environment (auto-generated)
-```
-
----
-
-## Simulated Test Data
-
-If GNU Radio is not ready yet, create a file called `gnu_radio_output.csv` in the project folder with this data to simulate signal readings:
+The pipeline expects raw IQ data in this format, as output by GNU Radio with a PlutoSDR:
 
 ```csv
-timestamp,frequency,power_db,detected
-1772744311,433920000,-72,1
-1772744312,433920000,-75,1
-1772744313,433920000,-78,1
-1772744314,433920000,-80,1
-1772744315,433920000,-35,1
-1772744316,433920000,-33,1
-1772744317,433920000,-38,0
-1772744318,433920000,-90,0
-1772744319,433920000,-88,1
-1772744320,433920000,-85,1
-1772744321,915000000,-60,1
-1772744322,915000000,-62,1
-1772744323,915000000,-25,1
-1772744324,915000000,-91,0
-1772744325,433920000,-72,1
+Time (s),I,Q
+0,0.21142578,0.002441406
+1.00E-06,0.20947266,0.043945312
+...
 ```
 
-Rows 5-7 and row 13 will trigger jam detection. When GNU Radio is ready just replace this file with real output.
+| Column | Type | Description |
+|---|---|---|
+| Time (s) | float | Sample timestamp in seconds |
+| I | float | In-phase component of raw IQ signal |
+| Q | float | Quadrature component of raw IQ signal |
+
+The pipeline converts I and Q to power_db automatically. There is no need to pre-process the CSV.
 
 ---
 
@@ -257,39 +312,22 @@ Rows 5-7 and row 13 will trigger jam detection. When GNU Radio is ready just rep
 
 When the EE students finish their GNU Radio flowgraph:
 
-1. Get the CSV column names from their output
-2. Get the file path where GNU Radio writes the CSV
-3. Update these lines at the top of `pipeline.py`:
+1. Get the file path where GNU Radio writes the CSV
+2. Confirm the column names match `Time (s)`, `I`, `Q`
+3. Update this line in `pipeline.py`:
 
 ```python
-CSV_FILE = "gnu_radio_output.csv"   # change to their file path
+CSV_FILE = "pluto_capture_auto_100-w-time.csv"   # change to their file path
 ```
 
-And update the column names in the `run()` function:
+If their column names are different update these lines in `process_iq_file()`:
 ```python
-freq_hz  = int(row["frequency"])         # match their column name
-rssi     = int(float(row["power_db"]))   # match their column name
-detected = row["detected"] == "1"        # match their column name
+df["power_db"] = 20 * np.log10(
+    np.maximum(np.sqrt(df["I"]**2 + df["Q"]**2), 1e-10)
+)
 ```
 
 Nothing else needs to change.
-
----
-
-## Jam Detection
-
-The pipeline automatically flags readings as jammed based on two conditions:
-
-| Condition | Threshold | What It Means |
-|---|---|---|
-| RSSI above floor | > -40 dBm | Signal is abnormally strong |
-| RSSI spike | ≥ 20 dBm jump | Sudden unexplained change |
-
-These thresholds are at the top of `pipeline.py` and can be adjusted once you have real data:
-```python
-JAM_RSSI_SPIKE = 20
-JAM_RSSI_FLOOR = -40
-```
 
 ---
 
@@ -299,16 +337,8 @@ Use these values to manually test `submitReading()` in Remix:
 
 **Normal signal (should pass):**
 ```
-freqHz:   433920000
-rssi:     -72
-detected: true
-metaHash: 0x0000000000000000000000000000000000000000000000000000000000000000
-```
-
-**Jamming signal (should pass but flag as jam):**
-```
-freqHz:   433920000
-rssi:     -35
+freqHz:   915000000
+rssi:     -13
 detected: true
 metaHash: 0x0000000000000000000000000000000000000000000000000000000000000000
 ```
@@ -316,14 +346,14 @@ metaHash: 0x0000000000000000000000000000000000000000000000000000000000000000
 **Bad frequency (should revert):**
 ```
 freqHz:   0
-rssi:     -72
+rssi:     -13
 detected: true
 metaHash: 0x0000000000000000000000000000000000000000000000000000000000000000
 ```
 
 **Bad RSSI (should revert):**
 ```
-freqHz:   433920000
+freqHz:   915000000
 rssi:     50
 detected: true
 metaHash: 0x0000000000000000000000000000000000000000000000000000000000000000
@@ -335,11 +365,15 @@ metaHash: 0x0000000000000000000000000000000000000000000000000000000000000000
 
 - [x] Smart contract deployed and tested
 - [x] Input validation working
-- [x] Middleware pipeline working with simulated data
-- [x] Jam detection implemented
+- [x] Real PlutoSDR IQ data pipeline working
+- [x] IQ to power conversion implemented
+- [x] Jam detection implemented and tuned to real signal range
+- [x] Primary User detection implemented
+- [x] Meta hash storing cryptographic proof of jam/PU state
 - [x] Log viewer working
-- [ ] GNU Radio integration (waiting on EE students)
-- [ ] Jam detection thresholds tuned with real data
+- [x] Baseline signal characterized at 915 MHz (-12 to -15 dBm)
+- [ ] Capture with real jamming event (waiting on EE students)
+- [ ] Threshold calibration with jamming data
 - [ ] Sepolia testnet deployment for permanent storage
 
 ---
@@ -349,17 +383,20 @@ metaHash: 0x0000000000000000000000000000000000000000000000000000000000000000
 **`ModuleNotFoundError: No module named 'web3'`**
 Your venv is not active. Run `source venv/Scripts/activate` first.
 
+**`ModuleNotFoundError: No module named 'numpy'` or `pandas`**
+Run `pip install numpy pandas` inside your active venv.
+
 **`Connection failed — is Hardhat node running?`**
 Open a new terminal and run `npx hardhat node` first.
 
 **`BadFunctionCallOutput` error**
-Your contract address is outdated. Redeploy in Remix and update `CONTRACT_ADDRESS` in `.env`.
+Your contract address is outdated. Redeploy in Remix, update `CONTRACT_ADDRESS` in `.env`, and refresh `abi.json`.
 
 **`ID out of range` error**
 You are trying to fetch a reading that does not exist yet. Check `totalReadings()` first.
 
 **Pipeline submits nothing**
-Make sure `gnu_radio_output.csv` exists in the project folder with the correct column names.
+Make sure your CSV file exists in the project folder and `CSV_FILE` in `pipeline.py` matches the exact filename.
 
 **Remix shows `Error while querying the provider`**
 Make sure Hardhat node is running and Environment in Remix is set to Hardhat Provider.
@@ -371,10 +408,11 @@ These are harmless line ending warnings from Windows. Your files were still adde
 
 ## Known Limitations
 
-- Hardhat resets every time it restarts — contract must be redeployed each session
-- Jam detection thresholds are estimates until real SDR data is available
+- Hardhat resets every time it restarts — contract must be redeployed each session and `.env` + `abi.json` must be updated
+- Jam and PU detection thresholds based on single baseline capture — will be refined with jamming data
 - Currently runs on local testnet only, not a live network
 - `.env` must be created manually on each machine — it is intentionally not on GitHub
+- Pipeline processes static files — live streaming from GNU Radio not yet implemented
 
 ---
 
@@ -384,6 +422,8 @@ These are harmless line ending warnings from Windows. Your files were still adde
 |---|---|
 | web3.py | Python library for talking to Ethereum |
 | python-dotenv | Loads `.env` variables into Python |
+| numpy | IQ to power conversion math |
+| pandas | CSV processing and data manipulation |
 | Hardhat | Local Ethereum blockchain for development |
 | Remix IDE | Contract deployment and testing (browser based) |
 | Node.js | Required to run Hardhat |
